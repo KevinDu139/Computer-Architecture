@@ -1,0 +1,178 @@
+// interface
+`include "cache_control_if.vh"
+`include "cpu_ram_if.vh"
+
+// types
+`include "cpu_types_pkg.vh"
+
+// mapped timing needs this. 1ns is too fast
+`timescale 1 ns / 1 ns
+
+module me    _tb;
+  // clock period
+  parameter PERIOD = 10;
+
+  // signals
+  logic CLK = 0, nRST;
+
+  // clock
+  always #(PERIOD/2) CLK++;
+
+  // interface
+  cache_control_if ccif();
+  cpu_ram_if ramif();
+
+  // test program
+  test PROG (CLK,nRST,ccif);
+
+  // dut
+`ifndef MAPPED
+  memory_control DUT (CLK,nRST,ccif);
+  ram DUTR (CLK, nRST, ramif);
+  
+  assign ramif.ramstate = ccif.ramstate;
+  assign ramif.ramload = ccif.ramload;
+  assign ramif.ramREN = ccif.ramREN;
+  assign ramif.ramWEN = ccif.ramWEN;
+  assign ramif.ramaddr = ccif.ramaddr;
+  assign ramif.ramstore = ccif.ramstore;
+`endif
+endmodule
+
+program test(input logic CLK, output logic nRST, cahce_control_if ccif);
+  // import word type
+  import cpu_types_pkg::*;
+  int i = 0;
+  parameter PERIOD = 10; //rid
+  integer memfile; //rid
+
+  initial 
+  begin
+  nRST = 0;
+
+  @(posedge CLK);
+  @(posedge CLK);
+  nRST = 1;
+  ccif.iREN = 0;
+  ccif.dWEN = 0;
+  ccif.dREN = 0;
+  ccif.iaddr = 0;
+  ccif.daddr = 0;
+  ccif.dstore = 0;
+
+  @(posedge CLK);
+  @(posedge CLK);
+/*
+  //rid
+  $display("read 20 instructions");
+	  for (int i = 0; i < 20; i++)
+	  begin
+	    ccif.iaddr = i << 2;
+	    ccif.iREN = 1'b1;
+	    ccif.dWEN = 1'b0;
+	    ccif.dREN = 1'b0;
+	    #(PERIOD);
+	  end
+	
+	  $display("load 4 datas start from 0x00f0");
+	  for (int i = 0; i < 4; i++)
+	  begin
+	    ccif.daddr = (i << 2) + 16'h00f0;
+	    ccif.iREN = 1'b0;
+	    ccif.dWEN = 1'b0;
+	    ccif.dREN = 1'b1;
+	    #(PERIOD);
+	  end
+	
+	  $display("write 5 datas start from 0x0080");
+	  for (int i = 0; i < 5; i++)
+	  begin
+	    ccif.daddr = (i << 2) + 16'h0080; 
+	    ccif.iREN = 1'b0;
+	    ccif.dWEN = 1'b1;
+	    ccif.dREN = 1'b0;
+	    ccif.dstore = i + 16'h0a00;
+	    #(PERIOD);
+	    #(PERIOD);
+	  end
+
+	  $display("load 5 datas start from 0x0080");
+	  for (int i = 0; i < 5; i++)
+	  begin
+	    ccif.daddr = (i << 2) + 16'h0080; 
+	    ccif.iREN = 1'b0;
+	    ccif.dWEN = 1'b0;
+	    ccif.dREN = 1'b1;
+	    #(PERIOD);
+	  end
+	
+
+	  /*$display("start dumping memory");
+	  memfile = $fopen("MemDumpLog.txt","w");
+	  for (int i = 0; i < 20; i++)
+	  begin
+	    ccif.iaddr = i << 2;
+	    ccif.iREN = 1'b1;
+	    ccif.dWEN = 1'b0;
+	    ccif.dREN = 1'b0;
+	    #(PERIOD);
+	    $fdisplay(memfile,"Location: 0x%h, Content: 0x%h", i<<2, ccif.ramload);
+	  end
+	  $fclose(memfile);
+	
+	   $display("should read data value");
+	  ccif.iaddr = 0;
+	  ccif.daddr = 16'h0080; 
+	  ccif.iREN = 1'b1;
+	  ccif.dWEN = 1'b0;
+	  ccif.dREN = 1'b1;
+	
+	  #(PERIOD);
+	  #(PERIOD);*/
+	  nRST = 0;
+    	  dump_memory();
+	  $finish; 
+  //end
+ end
+
+  task automatic dump_memory();
+    string filename = "memcpu.hex";
+    int memfd;
+
+    ccif.daddr = 0;
+    ccif.dWEN = 0;
+    ccif.dREN = 0;
+
+    memfd = $fopen(filename,"w");
+    if (memfd)
+      $display("Starting memory dump.");
+    else
+      begin $display("Failed to open %s.",filename); $finish; end
+
+    for (int unsigned i = 0; memfd && i < 16384; i++)
+    begin
+      int chksum = 0;
+      bit [7:0][7:0] values;
+      string ihex;
+
+      ccif.daddr = i << 2;
+      ccif.dREN = 1;
+      repeat (4) @(posedge CLK);
+      if (ccif.dload === 0)
+        continue;
+      values = {8'h04,16'(i),8'h00,ccif.dload};
+      foreach (values[j])
+        chksum += values[j];
+      chksum = 16'h100 - chksum;
+      ihex = $sformatf(":04%h00%h%h",16'(i),ccif.dload,8'(chksum));
+      $fdisplay(memfd,"%s",ihex.toupper());
+    end //for
+    if (memfd)
+    begin
+      ccif.dREN = 0;
+      $fdisplay(memfd,":00000001FF");
+      $fclose(memfd);
+      $display("Finished memory dump.");
+    end
+  endtask
+endprogram
