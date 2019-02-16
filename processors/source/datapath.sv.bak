@@ -1,0 +1,178 @@
+/*
+  Eric Villasenor
+  evillase@gmail.com
+
+  datapath contains register file, control, hazard,
+  muxes, and glue logic for processor
+*/
+
+// data path interface
+`include "datapath_cache_if.vh"
+`include "register_file_if.vh"
+`include "alu_if.vh"
+`include "control_unit_if.vh"
+//`include "request_unit_if.vh"
+`include "pipeline_if.vh"
+`include "hazard_unit_if.vh"
+
+// alu op, mips op, and instruction type
+`include "cpu_types_pkg.vh"
+
+module datapath (
+  input logic CLK, nRST,
+  datapath_cache_if.dp dpif
+);
+  // import types
+  import cpu_types_pkg::*;
+
+  // pc init
+  parameter PC_INIT = 0;
+
+
+  register_file_if rfif();
+  alu_if aluif();
+  //request_unit_if ruif();
+  control_unit_if cuif();
+  pipeline_if ifid();
+  pipeline_if idex();
+  pipeline_if exmem();
+  pipeline_if memwb();
+  hazard_unit_if huif();
+
+  register_file RF(CLK,nRST,rfif);
+  alu ALU(aluif);
+  control_unit CU(cuif);
+  //request_unit RU(CLK,nRST,ruif);
+  if_id IFID(CLK,nRST,ifid);
+  id_ex IDEX(CLK,nRST,idex);
+  ex_mem EXMEM(CLK,nRST,exmem);
+  mem_wb MEMWB(CLK,nRST,memwb);
+  hazard_unit HU(huif);
+
+  logic [15:0] Imm;
+  word_t pc, npc, newpc, branch, jump;
+  
+  assign newpc = (exmem.jsel_out == 0) ? exmem.npcout : ((exmem.jsel_out == 1 || exmem.jal_out == 1) ? {exmem.npcout[31:28], exmem.instructionout[25:0],2'b00} : ((exmem.jsel_out == 2) ? exmem.rdat1_out : branch));
+  assign npc = ifid.pcout + 4;
+  always_ff @(posedge CLK, negedge nRST) 
+  begin
+	if(!nRST)
+	begin
+	    pc <= '0;
+	    dpif.halt <= 0;
+	end
+	else
+	begin
+	  if(dpif.ihit == 1 && ~huif.freeze)
+	  begin
+	    pc <= newpc;
+	    dpif.halt <= idex.halt_out;
+	  end
+	end
+  end
+  
+  //datapath ports
+  assign Imm = (idex.instructionout[15] == 1)? 16'hffff : 16'h0000;
+  assign jump = {16'h0000, exmem.instructionout[15:0]};
+  assign branch = ((exmem.bne_out == 1 ? ~exmem.zero_out : exmem.zero_out) && (exmem.jsel_out == 4)) ? {exmem.npcout + {jump[29:0],2'b00}} : exmem.npcout;
+  assign dpif.imemREN = 1;
+  assign dpif.dmemREN = exmem.dREN_out;
+  assign dpif.dmemWEN = exmem.dWEN_out;
+  assign dpif.dmemaddr = exmem.outputPort_out;
+  assign dpif.dmemstore = exmem.rdat2_out;
+  assign dpif.imemaddr = pc;
+
+  //register ports
+  assign rfif.rsel1 = ifid.instructionout[25:21]; // rs
+  assign rfif.rsel2 = ifid.instructionout[20:16]; //rt           [15:11] rd
+  assign rfif.WEN = memwb.RegWEN_out; 
+  assign rfif.wsel = (memwb.Regdst_out == 0) ? memwb.instructionout[15:11] : ((memwb.Regdst_out == 1) ? memwb.instructionout[20:16] : 5'b11111); // ?? WB
+  assign rfif.wdat = memwb.jsel_out == 5 ? {memwb.instructionout[15:0],16'b0} : ((memwb.jsel_out == 3) ? memwb.npcout : (memwb.MemtoReg_out ? memwb.dmemload_out : memwb.outputPort_out));
+
+
+    //alu ports
+  assign aluif.aluop = idex.aluop_out;
+  assign aluif.portA = idex.rdat1_out;
+  assign aluif.portB = idex.ALUsrc_out == 0 ? idex.rdat2_out : (idex.ALUsrc_out == 1) ? {Imm,idex.instructionout[15:0]} : ((idex.ALUsrc_out == 2) ? {16'h0000,idex.instructionout[15:0]} : {'0,idex.instructionout[10:6]});
+
+  //request unit ports
+  //assign ruif.dWEN = cuif.dWEN;
+  //assign ruif.dREN = cuif.dREN;
+  //assign ruif.ihit = dpif.ihit;
+  //assign ruif.dhit = dpif.dhit;
+
+  //control unit ports
+  //assign cuif.instruction = dpif.imemload;
+  assign cuif.instruction = ifid.instructionout;
+
+  //hazard unit ports
+  assign huif.ifid_instr = ifid.instructionin;
+  assign huif.idex_instr = idex.instructionin;
+  assign huif.exmem_instr = exmem.instructionin;
+  assign huif.jsel = exmem.jsel;
+  //assign huif.RegWEN = cuif.RegWEN;
+  
+  // ifid
+  assign ifid.instructionin = dpif.imemload;
+  assign ifid.pcin = pc;
+  assign ifid.ihit = dpif.ihit;
+  assign ifid.freeze = huif.freeze;
+  assign ifid.flush = huif.flush;
+
+  //idex
+  assign idex.ihit = dpif.ihit;
+  assign idex.rdat1_in = rfif.rdat1;
+  assign idex.rdat2_in = rfif.rdat2;
+  assign idex.npcin = npc; 
+  assign idex.newpcin = newpc;
+  assign idex.dWEN_in = cuif.dWEN;
+  assign idex.dREN_in = cuif.dREN;
+  assign idex.RegWEN_in = cuif.RegWEN;
+  assign idex.MemtoReg_in = cuif.MemtoReg;
+  assign idex.halt_in = cuif.halt;
+  assign idex.jal_in = cuif.jal;
+  assign idex.bne_in = cuif.bne;
+  assign idex.ALUsrc_in = cuif.ALUsrc;
+  assign idex.Regdst_in = cuif.Regdst;
+  assign idex.jsel_in = cuif.jsel;
+  assign idex.aluop_in = cuif.aluop;
+  assign idex.imemren_in = 1;
+  assign idex.instructionin = ifid.instructionout;
+  assign idex.flush = huif.flush;
+  assign idex.freeze = huif.freeze;
+
+  //exmem
+  assign exmem.ihit = dpif.ihit;
+  assign exmem.dhit = dpif.dhit;
+  assign exmem.instructionin = idex.instructionout;
+  assign exmem.rdat1_in = idex.rdat1_out;
+  assign exmem.rdat2_in = idex.rdat2_out;
+  assign exmem.RegWEN_in = idex.RegWEN_out;
+  assign exmem.outputPort_in = aluif.outputPort;
+  assign exmem.npcin = idex.npcout;  
+  assign exmem.newpcin = idex.newpcout;
+  assign exmem.jsel_in = idex.jsel_out;
+  assign exmem.jal_in = idex.jal_out;
+  assign exmem.bne_in = idex.bne_out;
+  assign exmem.zero_in = aluif.zero;
+  assign exmem.dWEN_in = idex.dWEN_out;
+  assign exmem.dREN_in = idex.dREN_out;
+  assign exmem.MemtoReg_in = idex.MemtoReg_out;
+  assign exmem.Regdst_in = idex.Regdst_out;
+  assign exmem.dmemload_in = dpif.dmemload;
+  assign exmem.flush = huif.flush;
+
+  //memwb
+  assign memwb.ihit = dpif.ihit;
+  assign memwb.dhit = dpif.dhit;
+  assign memwb.instructionin = exmem.instructionout;
+  assign memwb.npcin = exmem.npcout;
+  //assign memwb.newpcin = exmem.newpcout;
+  assign memwb.RegWEN_in = exmem.RegWEN_out;
+  assign memwb.jsel_in = exmem.jsel_out;
+  assign memwb.outputPort_in = exmem.outputPort_out;
+  assign memwb.dmemload_in = exmem.dmemload_out;
+  assign memwb.Regdst_in = exmem.Regdst_out;
+  assign memwb.MemtoReg_in = exmem.MemtoReg_out;
+  
+endmodule
